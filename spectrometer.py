@@ -7,130 +7,151 @@ from collections import OrderedDict
 from PIL import Image, ImageDraw, ImageFile, ImageFont
 
 
-def find_hotspot_dimensions(pixels: dict, pic_width: int, pic_height: int) -> dict:
-    dimming_constant = 0.9
-    height_reduction_constant = 0.9
-    midpoint_x = pic_width // 2
-    midpoint_y = pic_height // 2
+class Aperture:
 
-    # Find brightest pixel in right side of the image along the vertical midpoint of the image
-    brightest_lux_range = range(midpoint_x, pic_width, 1)
-    brightest_lux, brightest_lux_x = find_brightest_x(pixels, brightest_lux_range, midpoint_y)
-    hotspot_min_lux = brightest_lux * dimming_constant
+    # pixels is of type PixelAccess, how do I hint that here?
+    def __init__(self, pixels, pic_width: int, pic_height: int):
+        """
+        Constructor
 
-    # Setup ranges to find hotspot bounds
-    right_x_range = range(brightest_lux_x, pic_width, 1)
-    midpoint_x_range = range(brightest_lux_x, midpoint_x, -1)
-    top_y_range = range(midpoint_y, pic_height, 1)
-    bottom_y_range = range(midpoint_y, 0, -1)
+        :param pixels: The return value of Image.load()
+        :param pic_width: Width of the image in pixels
+        :param pic_height: Height of the image in pixels
+        """
+        self.pixels = pixels
+        self.pic_width = pic_width
+        self.pic_height = pic_height
 
-    # finding horizontal bounds
-    hotspot_bound_midpoint_x = find_hotspot_horizontal_bound(pixels, midpoint_x_range, midpoint_x, hotspot_min_lux,
-                                                             brightest_lux_x)
-    hotspot_bound_right = find_hotspot_horizontal_bound(pixels, right_x_range, midpoint_x, hotspot_min_lux,
-                                                        brightest_lux_x)
+        self.dimming_constant = 0.9
+        self.height_reduction_constant = 0.9
+        self.pic_midpoint_x = pic_width // 2
+        self.pic_midpoint_y = pic_height // 2
+        self.constant_axis_x = 'x'
+        self.constant_axis_y = 'y'
 
-    # finding midpoint of horizontal hotspot
-    hotspot_midpoint_x = (hotspot_bound_midpoint_x + hotspot_bound_right) // 2
+        # Set with find_brightest_x()
+        self.brightest_lux = 0
+        self.brightest_lux_x = 0
+        self.hotspot_min_lux = 0
 
-    # finding vertical bounds from horizontal hotspot midpoint
-    hotspot_bound_top = find_hotspot_vertical_bound(pixels, top_y_range, hotspot_midpoint_x, hotspot_min_lux,
-                                                    midpoint_y)
-    hotspot_bound_bottom = find_hotspot_vertical_bound(pixels, bottom_y_range, hotspot_midpoint_x, hotspot_min_lux,
-                                                       midpoint_y)
-
-    # finding midpoint between vertical bounds and height of hotspot
-    hotspot_midpoint_y = (hotspot_bound_top + hotspot_bound_bottom) // 2
-    hotspot_height = (hotspot_bound_bottom - hotspot_bound_top) * height_reduction_constant
-
-    return {'x': hotspot_midpoint_x, 'y': hotspot_midpoint_y, 'h': hotspot_height, 'b': brightest_lux}
+        # Set with find_aperture_dimensions()
+        self.aperture_midpoint_x = 0
+        self.aperture_midpoint_y = 0
+        self.aperture_height = 0
 
 
-def find_lux(pixels: dict, x: int, y: int) -> int:
-    """
-    Find the brightness of a pixel
+    def find_lux(self, x: int, y: int) -> int:
+        """
+        Find the brightness of a pixel
 
-    :param pixels: The return value of Image.load()
-    :param x: The location of the pixel on the X axis
-    :param y: The location of the pixel on the Y axis
-    :return: The brightness of the pixel
-    """
+        :param x: The location of the pixel on the X axis
+        :param y: The location of the pixel on the Y axis
 
-    r, g, b = pixels[x, y]
-    return r + g + b
+        :return: The brightness of the pixel
+        """
+        r, g, b = self.pixels[x, y]
+        return r + g + b
 
+    def find_brightest_x(self):
+        """
+        Find the brightest pixel on the X axis
+        """
+        for x in range(self.pic_midpoint_x, self.pic_width, 1):
+            lux = self.find_lux(x, self.pic_midpoint_y)
+            if lux > self.brightest_lux:
+                self.brightest_lux = lux
+                self.brightest_lux_x = x
+        self.hotspot_min_lux = self.brightest_lux * self.dimming_constant
 
-def find_brightest_x(pixels: dict, the_range: range, midpoint_y: int) -> tuple:
-    """
-    Find the brightest pixel on the X axis
+    def find_hotspot_bound(self, the_range: range, constant_axis: str) -> int:
+        """
+        Find the bounds of a hotspot
 
-    :param pixels: The return value of Image.load()
-    :param the_range: A range that traverses each pixel from the right of the image to the horizontal middle
-    :param midpoint_y: The vertical middle of the image
-    :return: Brightest pixel's lux, int Brightest pixels location
-    """
+        :param the_range: A range that traverses pixels from the brightest_lux to another location on the constant axis
+        :param constant_axis: Axis, either 'x' or 'y' to remain constant
 
-    brightest_lux = 0
-    brightest_lux_x = 0
-    for x in the_range:
-        lux = find_lux(pixels, x, midpoint_y)
-        if lux > brightest_lux:
-            brightest_lux = lux
-            brightest_lux_x = x
-    return brightest_lux, brightest_lux_x
+        :return: Location where lux drops below hotspot_min_lux
+        """
+        for loc in the_range:
+            if constant_axis == 'x':
+                lux = self.find_lux(loc, self.pic_midpoint_y)
+            else:
+                lux = self.find_lux(self.pic_midpoint_x, loc)
+            if self.hotspot_min_lux > lux:
+                return loc
 
+        if constant_axis == 'x':
+            return self.brightest_lux_x
+        return self.pic_midpoint_y
 
-def find_hotspot_horizontal_bound(pixels: dict, the_range: range, midpoint_y: int, hotspot_min_lux: int,
-                                  brightest_lux_x: int) -> int:
-    """
-    Find the horizontal bounds of a hotspot
+    def find_hotspot_horizontal_bound(self, the_range: range) -> int:
+        """
+        Find the horizontal bounds of a hotspot
 
-    :param pixels: The return value of Image.load()
-    :param the_range: A range that traverses pixels from the brightest_lux to another location on the X axis
-    :param midpoint_y: The vertical middle of the image
-    :param hotspot_min_lux: A lux value equal to the brightest_lux multiplied by a dimming constant
-    :param brightest_lux_x: Location of the brightest pixel on the X axis
-    :return: Location where lux drops below hotspot_min_lux
-    """
+        :param the_range: A range that traverses pixels from the brightest_lux to another location on the X axis
 
-    for loc in the_range:
-        lux = find_lux(pixels, loc, midpoint_y)
-        if hotspot_min_lux > lux:
-            return loc
-    return brightest_lux_x
+        :return: Location where lux drops below hotspot_min_lux
+        """
+        for x in the_range:
+            lux = self.find_lux(x, self.pic_midpoint_y)
+            if self.hotspot_min_lux > lux:
+                return x
+        return self.brightest_lux_x
 
+    def find_hotspot_vertical_bound(self, the_range: range) -> int:
+        """
+        Find the vertical bounds of the hotspot with a falloff tolerance of max_count
 
-def find_hotspot_vertical_bound(pixels: dict, the_range: range, hotspot_midpoint_x: int, hotspot_min_lux: int,
-                                midpoint_y: int) -> int:
-    """
-    Find the vertical bounds of the hotspot with a falloff tolerance of max_count
+        :param the_range: A range that traverses pixels from the midpoint_y to another location on the Y axis
 
-    :param pixels: The return value of Image.load()
-    :param the_range: A range that traverses pixels from the midpoint_y to another location on the Y axis
-    :param hotspot_midpoint_x: Midpoint location on the X axis between the horizontal hotspot bounds
-    :param hotspot_min_lux: A lux value equal to the brightest_lux multiplied by a dimming constant
-    :param midpoint_y: The vertical middle of the image
-    :return: Location on Y axis + max_count where lux drops below hotspot_min_lux
-    """
+        :return: Location on Y axis where lux drops below hotspot_min_lux
+        """
+        count = 0
+        max_count = 64
+        vertical_bound = self.pic_midpoint_y
+        for y in the_range:
+            lux = self.find_lux(self.aperture_midpoint_x, y)
+            if self.hotspot_min_lux > lux:
+                count += 1
+                if count > max_count:
+                    break
+            else:
+                vertical_bound = y
+        return vertical_bound
 
-    count = 0
-    max_count = 64
-    for y in the_range:
-        lux = find_lux(pixels, hotspot_midpoint_x, y)
-        if hotspot_min_lux > lux:
-            count += 1
-            if count > max_count:
-                break
-        else:
-            return y
-    return midpoint_y
+    def find_aperture_dimensions(self) -> dict:
+        # Find brightest pixel in right side of the image along the vertical midpoint of the image
+        self.find_brightest_x()
 
+        # Setup ranges to find hotspot bounds
+        brightest_lux_x_to_right = range(self.brightest_lux_x, self.pic_width, 1)
+        brightest_lux_x_to_center = range(self.brightest_lux_x, self.pic_midpoint_x, -1)
+        pic_midpoint_y_to_bottom = range(self.pic_midpoint_y, self.pic_height, 1)
+        pic_midpoint_y_to_top = range(self.pic_midpoint_y, 0, -1)
 
-# draw aperture onto image
-def draw_aperture(aperture, draw):
-    fill_color = "#000"
-    draw.line((aperture['x'], aperture['y'] - aperture['h'] / 2, aperture['x'], aperture['y'] + aperture['h'] / 2),
-              fill=fill_color)
+        # finding horizontal bounds
+        hotspot_bound_left = self.find_hotspot_bound(brightest_lux_x_to_center, self.constant_axis_y)
+        hotspot_bound_right = self.find_hotspot_bound(brightest_lux_x_to_right, self.constant_axis_y)
+
+        # finding horizontal midpoint of aperture
+        self.aperture_midpoint_x = (hotspot_bound_left + hotspot_bound_right) // 2
+
+        # finding vertical bounds from horizontal hotspot midpoint
+        hotspot_bound_top = self.find_hotspot_bound(pic_midpoint_y_to_top, self.constant_axis_x)
+        hotspot_bound_bottom = self.find_hotspot_bound(pic_midpoint_y_to_bottom, self.constant_axis_x)
+
+        # finding midpoint between vertical bounds and height of hotspot
+        self.aperture_midpoint_y = (hotspot_bound_top + hotspot_bound_bottom) // 2
+        self.aperture_height = int((hotspot_bound_top - hotspot_bound_bottom) * self.height_reduction_constant)
+
+        return {'x': self.aperture_midpoint_x, 'y': self.aperture_midpoint_y, 'h': self.aperture_height, 'b': self.brightest_lux}
+
+    def draw_vertical_aperture_midpoint_line(self, draw):
+        fill_color = "#000"
+        aperture_top_y = self.aperture_midpoint_y + self.aperture_height // 2
+        aperture_bottom_y = self.aperture_midpoint_y - self.aperture_height // 2
+        draw.line((self.aperture_midpoint_x, aperture_top_y,
+                   self.aperture_midpoint_x, aperture_bottom_y), fill=fill_color)
 
 
 # draw scan line
@@ -184,6 +205,7 @@ def take_picture(camera, name, shutter_speed):
     camera.awb_mode = 'off'
     camera.awb_gains = (1, 1)
 
+    # Why is this sleeping?
     time.sleep(3)
 
     raw_filename = name + "_raw.jpg"
@@ -347,18 +369,19 @@ def main():
 
     # 2. Get picture's aperture
     pic_pixels = im.load()
-    aperture = find_hotspot_dimensions(pic_pixels, im.size[0], im.size[1])
+    aperture = Aperture(pic_pixels, im.size[0], im.size[1])
+    aperture_dimensions = aperture.find_aperture_dimensions()
 
     # 3. Draw aperture and scan line
     spectrum_angle = 0.03
     draw = ImageDraw.Draw(im)
-    draw_aperture(aperture, draw)
-    draw_scan_line(aperture, draw, spectrum_angle)
+    aperture.draw_vertical_aperture_midpoint_line(draw)
+    draw_scan_line(aperture_dimensions, draw, spectrum_angle)
 
     # 4. Draw graph on picture
     wavelength_factor = 0.892  # 1000/mm
     # wavelength_factor=0.892*2.0*600/650 # 500/mm
-    results, max_result = draw_graph(draw, pic_pixels, aperture, spectrum_angle, wavelength_factor)
+    results, max_result = draw_graph(draw, pic_pixels, aperture_dimensions, spectrum_angle, wavelength_factor)
 
     # 5. Inform user of issues with exposure
     inform_user_of_exposure(max_result)

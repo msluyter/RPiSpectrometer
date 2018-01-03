@@ -1,3 +1,4 @@
+import logging
 import sys
 import math
 import time
@@ -7,10 +8,12 @@ from collections import OrderedDict
 from PIL import Image, ImageDraw, ImageFile, ImageFont
 
 
-class Aperture:
+LOGGER = logging.getLogger(__name__)
 
+
+class PicHelper:
     # pixels is of type PixelAccess, how do I hint that here?
-    def __init__(self, pixels, pic_width: int, pic_height: int):
+    def __init__(self, pixels, pic_width: int, pic_height: int, *, brightest_lux=0, aperture_height=0):
         """
         Constructor
 
@@ -19,28 +22,12 @@ class Aperture:
         :param pic_height: Height of the image in pixels
         """
         self.pixels = pixels
-        self.pic_width = pic_width
-        self.pic_height = pic_height
+        self.width = pic_width
+        self.height = pic_height
+        self.midpoint_x = pic_width // 2
+        self.midpoint_y = pic_height // 2
 
-        self.dimming_constant = 0.9
-        self.height_reduction_constant = 0.9
-        self.pic_midpoint_x = pic_width // 2
-        self.pic_midpoint_y = pic_height // 2
-        self.constant_axis_x = 'x'
-        self.constant_axis_y = 'y'
-
-        # Set with find_brightest_x()
-        self.brightest_lux = 0
-        self.brightest_lux_x = 0
-        self.hotspot_min_lux = 0
-
-        # Set with find_aperture_dimensions()
-        self.aperture_midpoint_x = 0
-        self.aperture_midpoint_y = 0
-        self.aperture_height = 0
-
-
-    def find_lux(self, x: int, y: int) -> int:
+    def pixel_lux(self, x: int, y: int) -> int:
         """
         Find the brightness of a pixel
 
@@ -52,37 +39,74 @@ class Aperture:
         r, g, b = self.pixels[x, y]
         return r + g + b
 
+
+class Aperture:
+
+    DIMMING_CONSTANT = 0.9
+    HEIGHT_REDUCTION_CONSTANT = 0.9
+
+    def __init__(self, pic_helper, brightest_lux=0, brightest_lux_x=0, min_lux=0, midpoint_x=0, midpoint_y=0,
+                 height=0):
+        """
+        Constructor
+
+        :param pic_helper: The PicHelper class
+        """
+
+        self.pic = pic_helper
+
+        # Set with find_brightest_x()
+        self.brightest_lux = brightest_lux
+        self.brightest_lux_x = brightest_lux_x
+        self.hotspot_min_lux = min_lux
+
+        # Set with find_aperture_dimensions()
+        self.midpoint_x = midpoint_x
+        self.midpoint_y = midpoint_y
+        self.height = height
+
+    # factory
+    @classmethod
+    def find_dimensions(cls, pic_helper):
+        a = Aperture(pic_helper)
+
+        # Find brightest pixel in right side of the image along the vertical midpoint of the image
+        a.find_brightest_x()
+
+        # Setup ranges to find hotspot bounds
+        brightest_lux_x_to_right = range(a.brightest_lux_x, a.pic.width)
+        brightest_lux_x_to_center = range(a.brightest_lux_x, a.pic.midpoint_x, -1)
+        pic_midpoint_y_to_bottom = range(a.pic.midpoint_y, a.pic.height)
+        pic_midpoint_y_to_top = range(a.pic.midpoint_y, 0, -1)
+
+        # finding horizontal bounds
+        hotspot_bound_left = a.find_hotspot_horizontal_bound(brightest_lux_x_to_center)
+        hotspot_bound_right = a.find_hotspot_horizontal_bound(brightest_lux_x_to_right)
+
+        # finding horizontal midpoint of aperture
+        a.aperture_midpoint_x = (hotspot_bound_left + hotspot_bound_right) // 2
+
+        # finding vertical bounds from horizontal hotspot midpoint
+        hotspot_bound_top = a.find_hotspot_vertical_bound(pic_midpoint_y_to_top)
+        hotspot_bound_bottom = a.find_hotspot_vertical_bound(pic_midpoint_y_to_bottom)
+
+        # finding midpoint between vertical bounds and height of hotspot
+        a.aperture_midpoint_y = (hotspot_bound_top + hotspot_bound_bottom) // 2
+        a.aperture_height = int((hotspot_bound_top - hotspot_bound_bottom) * a.HEIGHT_REDUCTION_CONSTANT)
+
+        return a
+
+
     def find_brightest_x(self):
         """
         Find the brightest pixel on the X axis
         """
-        for x in range(self.pic_midpoint_x, self.pic_width, 1):
-            lux = self.find_lux(x, self.pic_midpoint_y)
+        for x in range(self.pic.midpoint_x, self.pic.width, 1):
+            lux = self.pic.pixel_lux(x, self.pic.midpoint_y)
             if lux > self.brightest_lux:
                 self.brightest_lux = lux
                 self.brightest_lux_x = x
-        self.hotspot_min_lux = self.brightest_lux * self.dimming_constant
-
-    def find_hotspot_bound(self, the_range: range, constant_axis: str) -> int:
-        """
-        Find the bounds of a hotspot
-
-        :param the_range: A range that traverses pixels from the brightest_lux to another location on the constant axis
-        :param constant_axis: Axis, either 'x' or 'y' to remain constant
-
-        :return: Location where lux drops below hotspot_min_lux
-        """
-        for loc in the_range:
-            if constant_axis == 'x':
-                lux = self.find_lux(loc, self.pic_midpoint_y)
-            else:
-                lux = self.find_lux(self.pic_midpoint_x, loc)
-            if self.hotspot_min_lux > lux:
-                return loc
-
-        if constant_axis == 'x':
-            return self.brightest_lux_x
-        return self.pic_midpoint_y
+        self.hotspot_min_lux = self.brightest_lux * self.DIMMING_CONSTANT
 
     def find_hotspot_horizontal_bound(self, the_range: range) -> int:
         """
@@ -93,7 +117,7 @@ class Aperture:
         :return: Location where lux drops below hotspot_min_lux
         """
         for x in the_range:
-            lux = self.find_lux(x, self.pic_midpoint_y)
+            lux = self.pic.pixel_lux(x, self.pic.midpoint_y)
             if self.hotspot_min_lux > lux:
                 return x
         return self.brightest_lux_x
@@ -106,52 +130,25 @@ class Aperture:
 
         :return: Location on Y axis where lux drops below hotspot_min_lux
         """
-        count = 0
-        max_count = 64
-        vertical_bound = self.pic_midpoint_y
+        gap_pixel_count = 0
+        max_gap_height = 64
+        vertical_bound = self.pic.midpoint_y
         for y in the_range:
-            lux = self.find_lux(self.aperture_midpoint_x, y)
+            lux = self.pic.pixel_lux(self.midpoint_x, y)
             if self.hotspot_min_lux > lux:
-                count += 1
-                if count > max_count:
+                gap_pixel_count += 1
+                if gap_pixel_count > max_gap_height:
                     break
             else:
                 vertical_bound = y
         return vertical_bound
 
-    def find_aperture_dimensions(self) -> dict:
-        # Find brightest pixel in right side of the image along the vertical midpoint of the image
-        self.find_brightest_x()
 
-        # Setup ranges to find hotspot bounds
-        brightest_lux_x_to_right = range(self.brightest_lux_x, self.pic_width, 1)
-        brightest_lux_x_to_center = range(self.brightest_lux_x, self.pic_midpoint_x, -1)
-        pic_midpoint_y_to_bottom = range(self.pic_midpoint_y, self.pic_height, 1)
-        pic_midpoint_y_to_top = range(self.pic_midpoint_y, 0, -1)
-
-        # finding horizontal bounds
-        hotspot_bound_left = self.find_hotspot_bound(brightest_lux_x_to_center, self.constant_axis_y)
-        hotspot_bound_right = self.find_hotspot_bound(brightest_lux_x_to_right, self.constant_axis_y)
-
-        # finding horizontal midpoint of aperture
-        self.aperture_midpoint_x = (hotspot_bound_left + hotspot_bound_right) // 2
-
-        # finding vertical bounds from horizontal hotspot midpoint
-        hotspot_bound_top = self.find_hotspot_bound(pic_midpoint_y_to_top, self.constant_axis_x)
-        hotspot_bound_bottom = self.find_hotspot_bound(pic_midpoint_y_to_bottom, self.constant_axis_x)
-
-        # finding midpoint between vertical bounds and height of hotspot
-        self.aperture_midpoint_y = (hotspot_bound_top + hotspot_bound_bottom) // 2
-        self.aperture_height = int((hotspot_bound_top - hotspot_bound_bottom) * self.height_reduction_constant)
-
-        return {'x': self.aperture_midpoint_x, 'y': self.aperture_midpoint_y, 'h': self.aperture_height, 'b': self.brightest_lux}
-
-    def draw_vertical_aperture_midpoint_line(self, draw):
-        fill_color = "#000"
-        aperture_top_y = self.aperture_midpoint_y + self.aperture_height // 2
-        aperture_bottom_y = self.aperture_midpoint_y - self.aperture_height // 2
-        draw.line((self.aperture_midpoint_x, aperture_top_y,
-                   self.aperture_midpoint_x, aperture_bottom_y), fill=fill_color)
+def draw_vertical_aperture_midpoint_line(aperture, draw):
+    fill_color = "#000"
+    aperture_top_y = aperture.midpoint_y + aperture.height // 2
+    aperture_bottom_y = aperture.midpoint_y - aperture.height // 2
+    draw.line((aperture.midpoint_x, aperture_top_y, aperture.midpoint_x, aperture_bottom_y), fill=fill_color)
 
 
 # draw scan line
@@ -213,7 +210,7 @@ def take_picture(camera, name, shutter_speed):
     return raw_filename
 
 
-def draw_graph(draw, pic_pixels, aperture, spectrum_angle, wavelength_factor):
+def draw_graph(draw, pic_pixels, aperture, spectrum_angle, wavelength_factor, font_location):
     aperture_height = aperture['h'] / 2
     step = 1
     last_graph_y = 0
@@ -261,17 +258,17 @@ def draw_graph(draw, pic_pixels, aperture, spectrum_angle, wavelength_factor):
         graph_y = amplitude / 50 * aperture_height
         draw.line((x - step, y0 + aperture_height - last_graph_y, x, y0 + aperture_height - graph_y), fill="#fff")
         last_graph_y = graph_y
-    draw_ticks_and_frequencies(draw, aperture, spectrum_angle, wavelength_factor)
+    draw_ticks_and_frequencies(draw, aperture, spectrum_angle, wavelength_factor, font_location)
     return results, max_result
 
 
-def draw_ticks_and_frequencies(draw, aperture, spectrum_angle, wavelength_factor):
+def draw_ticks_and_frequencies(draw, aperture, spectrum_angle, wavelength_factor, font_location):
     aperture_height = aperture['h'] / 2
     for wl in range(400, 1001, 50):
         x = aperture['x'] - (wl / wavelength_factor)
         y0 = math.tan(spectrum_angle) * (aperture['x'] - x) + aperture['y']
         draw.line((x, y0 + aperture_height + 5, x, y0 + aperture_height - 5), fill="#fff")
-        font = ImageFont.truetype('/usr/share/fonts/truetype/lato/Lato-Regular.ttf', 12)
+        font = ImageFont.truetype(font_location, 12)
         draw.text((x, y0 + aperture_height + 15), str(wl), font=font, fill="#fff")
 
 
@@ -309,7 +306,7 @@ def export_csv(name, normalized_results):
     csv.close()
 
 
-def export_diagram(name, normalized_results):
+def export_diagram(name, normalized_results, font_location):
     antialias = 4
     w = 600 * antialias
     h2 = 300 * antialias
@@ -339,7 +336,7 @@ def export_diagram(name, normalized_results):
     draw.polygon(pl, fill="#FFF")
     draw.polygon(pl)
 
-    font = ImageFont.truetype('/usr/share/fonts/truetype/lato/Lato-Regular.ttf', 12 * antialias)
+    font = ImageFont.truetype(font_location, 12 * antialias)
     draw.line((0, h, w, h), fill="#000", width=antialias)
 
     for wl in range(400, 1001, 10):
@@ -369,19 +366,23 @@ def main():
 
     # 2. Get picture's aperture
     pic_pixels = im.load()
-    aperture = Aperture(pic_pixels, im.size[0], im.size[1])
-    aperture_dimensions = aperture.find_aperture_dimensions()
+    pic_helper = PicHelper(pic_pixels, im.size[0], im.size[1])
+    aperture = Aperture.find_dimensions(pic_helper)
+    aperture_dict = {'x': aperture.midpoint_x, 'y': aperture.midpoint_y, 'h': aperture.height,
+                     'b': aperture.brightest_lux}  # get rid of this dict asap
 
     # 3. Draw aperture and scan line
+    font_location = '/usr/share/fonts/truetype/lato/Lato-Regular.ttf'
     spectrum_angle = 0.03
     draw = ImageDraw.Draw(im)
-    aperture.draw_vertical_aperture_midpoint_line(draw)
-    draw_scan_line(aperture_dimensions, draw, spectrum_angle)
+    draw_vertical_aperture_midpoint_line(aperture, draw)
+    draw_scan_line(aperture_dict, draw, spectrum_angle)
 
     # 4. Draw graph on picture
     wavelength_factor = 0.892  # 1000/mm
     # wavelength_factor=0.892*2.0*600/650 # 500/mm
-    results, max_result = draw_graph(draw, pic_pixels, aperture_dimensions, spectrum_angle, wavelength_factor)
+    results, max_result = draw_graph(draw, pic_pixels, aperture_dict, spectrum_angle, wavelength_factor,
+                                     font_location)
 
     # 5. Inform user of issues with exposure
     inform_user_of_exposure(max_result)
@@ -396,8 +397,12 @@ def main():
     export_csv(name, normalized_results)
 
     # 9. Generate spectrum diagram
-    export_diagram(name, normalized_results)
+    export_diagram(name, normalized_results, font_location)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+    )
     main()

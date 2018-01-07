@@ -7,141 +7,10 @@ from fractions import Fraction
 from collections import OrderedDict
 from PIL import Image, ImageDraw, ImageFile, ImageFont
 
+from PicHelper import PicHelper
+from Aperture import Aperture
 
 LOGGER = logging.getLogger(__name__)
-
-
-class PicHelper:
-    # pixels is of type PixelAccess, how do I hint that here?
-    def __init__(self, pixels, pic_width: int, pic_height: int, *, brightest_lux=0, aperture_height=0):
-        """
-        Constructor
-
-        :param pixels: The return value of Image.load()
-        :param pic_width: Width of the image in pixels
-        :param pic_height: Height of the image in pixels
-        """
-        self.pixels = pixels
-        self.width = pic_width
-        self.height = pic_height
-        self.midpoint_x = pic_width // 2
-        self.midpoint_y = pic_height // 2
-
-    def pixel_lux(self, x: int, y: int) -> int:
-        """
-        Find the brightness of a pixel
-
-        :param x: The location of the pixel on the X axis
-        :param y: The location of the pixel on the Y axis
-
-        :return: The brightness of the pixel
-        """
-        r, g, b = self.pixels[x, y]
-        return r + g + b
-
-
-class Aperture:
-
-    DIMMING_CONSTANT = 0.9
-    HEIGHT_REDUCTION_CONSTANT = 0.9
-
-    def __init__(self, pic_helper, brightest_lux=0, brightest_lux_x=0, min_lux=0, midpoint_x=0, midpoint_y=0,
-                 height=0):
-        """
-        Constructor
-
-        :param pic_helper: The PicHelper class
-        """
-
-        self.pic = pic_helper
-
-        # Set with find_brightest_x()
-        self.brightest_lux = brightest_lux
-        self.brightest_lux_x = brightest_lux_x
-        self.hotspot_min_lux = min_lux
-
-        # Set with find_aperture_dimensions()
-        self.midpoint_x = midpoint_x
-        self.midpoint_y = midpoint_y
-        self.height = height
-
-    # factory
-    @classmethod
-    def find_dimensions(cls, pic_helper):
-        a = Aperture(pic_helper)
-
-        # Find brightest pixel in right side of the image along the vertical midpoint of the image
-        a.find_brightest_x()
-
-        # Setup ranges to find hotspot bounds
-        brightest_lux_x_to_right = range(a.brightest_lux_x, a.pic.width)
-        brightest_lux_x_to_center = range(a.brightest_lux_x, a.pic.midpoint_x, -1)
-        pic_midpoint_y_to_bottom = range(a.pic.midpoint_y, a.pic.height)
-        pic_midpoint_y_to_top = range(a.pic.midpoint_y, 0, -1)
-
-        # finding horizontal bounds
-        hotspot_bound_left = a.find_hotspot_horizontal_bound(brightest_lux_x_to_center)
-        hotspot_bound_right = a.find_hotspot_horizontal_bound(brightest_lux_x_to_right)
-
-        # finding horizontal midpoint of aperture
-        a.aperture_midpoint_x = (hotspot_bound_left + hotspot_bound_right) // 2
-
-        # finding vertical bounds from horizontal hotspot midpoint
-        hotspot_bound_top = a.find_hotspot_vertical_bound(pic_midpoint_y_to_top)
-        hotspot_bound_bottom = a.find_hotspot_vertical_bound(pic_midpoint_y_to_bottom)
-
-        # finding midpoint between vertical bounds and height of hotspot
-        a.aperture_midpoint_y = (hotspot_bound_top + hotspot_bound_bottom) // 2
-        a.aperture_height = int((hotspot_bound_top - hotspot_bound_bottom) * a.HEIGHT_REDUCTION_CONSTANT)
-
-        return a
-
-
-    def find_brightest_x(self):
-        """
-        Find the brightest pixel on the X axis
-        """
-        for x in range(self.pic.midpoint_x, self.pic.width, 1):
-            lux = self.pic.pixel_lux(x, self.pic.midpoint_y)
-            if lux > self.brightest_lux:
-                self.brightest_lux = lux
-                self.brightest_lux_x = x
-        self.hotspot_min_lux = self.brightest_lux * self.DIMMING_CONSTANT
-
-    def find_hotspot_horizontal_bound(self, the_range: range) -> int:
-        """
-        Find the horizontal bounds of a hotspot
-
-        :param the_range: A range that traverses pixels from the brightest_lux to another location on the X axis
-
-        :return: Location where lux drops below hotspot_min_lux
-        """
-        for x in the_range:
-            lux = self.pic.pixel_lux(x, self.pic.midpoint_y)
-            if self.hotspot_min_lux > lux:
-                return x
-        return self.brightest_lux_x
-
-    def find_hotspot_vertical_bound(self, the_range: range) -> int:
-        """
-        Find the vertical bounds of the hotspot with a falloff tolerance of max_count
-
-        :param the_range: A range that traverses pixels from the midpoint_y to another location on the Y axis
-
-        :return: Location on Y axis where lux drops below hotspot_min_lux
-        """
-        gap_pixel_count = 0
-        max_gap_height = 64
-        vertical_bound = self.pic.midpoint_y
-        for y in the_range:
-            lux = self.pic.pixel_lux(self.midpoint_x, y)
-            if self.hotspot_min_lux > lux:
-                gap_pixel_count += 1
-                if gap_pixel_count > max_gap_height:
-                    break
-            else:
-                vertical_bound = y
-        return vertical_bound
 
 
 def draw_vertical_aperture_midpoint_line(aperture, draw):
@@ -362,11 +231,11 @@ def main():
     name = str(sys.argv[1])
     shutter_speed = int(sys.argv[2])
     raw_filename = take_picture(camera, name, shutter_speed)
-    im = Image.open(raw_filename)
 
     # 2. Get picture's aperture
-    pic_pixels = im.load()
-    pic_helper = PicHelper(pic_pixels, im.size[0], im.size[1])
+    img = Image.open(raw_filename)
+    pic_pixels = img.load()
+    pic_helper = PicHelper(pic_pixels, img.size[0], img.size[1])
     aperture = Aperture.find_dimensions(pic_helper)
     aperture_dict = {'x': aperture.midpoint_x, 'y': aperture.midpoint_y, 'h': aperture.height,
                      'b': aperture.brightest_lux}  # get rid of this dict asap
